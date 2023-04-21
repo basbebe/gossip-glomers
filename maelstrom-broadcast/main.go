@@ -2,31 +2,48 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
+	"errors"
 	"log"
-	"sort"
 	"sync"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
 
-type store struct {
-	mu   *sync.RWMutex
-	list []int
+type nodeState struct {
+	Node *maelstrom.Node
+
+	valuesLock *sync.RWMutex
+	values     []int
+
+	topoLock *sync.RWMutex
+	topology []string
 }
 
-func (s *store) append(n int) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.list = append(s.list, n)
+func (s *nodeState) appendValue(n int) {
+	s.valuesLock.Lock()
+	defer s.valuesLock.Unlock()
+	s.values = append(s.values, n)
 }
 
-func (s *store) get() []int {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	newList := make([]int, len(s.list))
-	copy(newList, s.list)
+func (s *nodeState) getValues() []int {
+	s.valuesLock.RLock()
+	defer s.valuesLock.RUnlock()
+	newList := make([]int, len(s.values))
+	copy(newList, s.values)
 	return newList
+}
+
+func (s *nodeState) setTopology(topology map[string][]string) error {
+	s.topoLock.Lock()
+	defer s.topoLock.Unlock()
+	if s.topology == nil {
+		topo, ok := topology[s.Node.ID()]
+		if !ok {
+			return errors.New("could not set topology")
+		}
+		s.topology = topo
+	}
+	return nil
 }
 
 func main() {
@@ -38,18 +55,20 @@ func main() {
 
 func run() error {
 	var (
-		n    *maelstrom.Node
-		seen *store
-		err  error
+		n     *maelstrom.Node
+		state *nodeState
+		err   error
 	)
 
 	n = maelstrom.NewNode()
 
-	seen = &store{
-		mu: &sync.RWMutex{},
+	state = &nodeState{
+		Node:       n,
+		valuesLock: &sync.RWMutex{},
+		topoLock:   &sync.RWMutex{},
 	}
 
-	registerHandles(n, seen)
+	registerHandles(state)
 
 	err = n.Run()
 	if err != nil {
@@ -59,36 +78,29 @@ func run() error {
 	return nil
 }
 
-func registerHandles(n *maelstrom.Node, seen *store) {
-	n.Handle("broadcast", func(msg maelstrom.Message) error {
-		resp, err := handleBroadcast(msg, seen)
-		if err != nil {
-			return err
-		}
-		return n.Reply(msg, resp)
-	})
+func registerHandles(state *nodeState) {
+	registerHandle(state, "broadcast", handleBroadcast)
+	registerHandle(state, "read", handleRead)
+	registerHandle(state, "topology", handleTopology)
 
-	n.Handle("read", func(msg maelstrom.Message) error {
-		resp, err := handleRead(msg, seen)
-		if err != nil {
-			return err
-		}
-		return n.Reply(msg, resp)
-	})
-
-	n.Handle("topology", func(msg maelstrom.Message) error {
-		resp, err := handleTopology(n, msg)
-		if err != nil {
-			return err
-		}
-		return n.Reply(msg, resp)
-	})
-
-	// registerHandle(n, "broadcast", handleBroadcast)
 }
 
-func handleBroadcast(msg maelstrom.Message, seen *store) (any, error) {
+func registerHandle(state *nodeState, typ string, fn func(*nodeState, maelstrom.Message) (any, error)) {
+	h := state.Node.Handle
 
+	handlerFunc := func(msg maelstrom.Message) error {
+		resp, err := fn(state, msg)
+		if err != nil {
+			return err
+		}
+
+		return state.Node.Reply(msg, resp)
+	}
+
+	h(typ, handlerFunc)
+}
+
+func handleBroadcast(state *nodeState, msg maelstrom.Message) (any, error) {
 	var body struct {
 		Message int `json:"message"`
 	}
@@ -97,7 +109,7 @@ func handleBroadcast(msg maelstrom.Message, seen *store) (any, error) {
 		return nil, err
 	}
 
-	seen.append(body.Message)
+	state.appendValue(body.Message)
 
 	resp := map[string]string{
 		"type": "broadcast_ok",
@@ -106,14 +118,9 @@ func handleBroadcast(msg maelstrom.Message, seen *store) (any, error) {
 	return resp, nil
 }
 
-func handleRead(msg maelstrom.Message, seen *store) (any, error) {
+func handleRead(state *nodeState, msg maelstrom.Message) (any, error) {
 	var body map[string]any
-	err := json.Unmarshal(msg.Body, &body)
-	if err != nil {
-		return nil, err
-	}
-
-	messages := seen.get()
+	messages := state.getValues()
 
 	body["type"] = "read_ok"
 	body["messages"] = messages
@@ -121,7 +128,7 @@ func handleRead(msg maelstrom.Message, seen *store) (any, error) {
 	return body, nil
 }
 
-func handleTopology(n *maelstrom.Node, msg maelstrom.Message) (any, error) {
+func handleTopology(state *nodeState, msg maelstrom.Message) (any, error) {
 	var body struct {
 		Topology map[string][]string `json:"topology"`
 	}
@@ -130,14 +137,9 @@ func handleTopology(n *maelstrom.Node, msg maelstrom.Message) (any, error) {
 		return nil, err
 	}
 
-	id := n.ID()
-	neighbours := n.NodeIDs()
-
-	neighboursReq, ok := body.Topology[id]
-
-	ok = compareTopology(id, neighboursReq, neighbours)
-	if !ok {
-		return nil, fmt.Errorf("topology not ok: got %s, have %s", neighboursReq, neighbours)
+	err = state.setTopology(body.Topology)
+	if err != nil {
+		return nil, err
 	}
 
 	resp := map[string]string{
@@ -145,38 +147,4 @@ func handleTopology(n *maelstrom.Node, msg maelstrom.Message) (any, error) {
 	}
 
 	return resp, nil
-}
-
-func compareTopology(id string, t1 []string, t2 []string) bool {
-	lenDiff := len(t1) - len(t2)
-	if -1 > lenDiff || lenDiff > 1 {
-		return false
-	}
-
-	if len(t1) == 0 && len(t2) == 0 {
-		return true
-	}
-
-	sort.Strings(t1)
-	sort.Strings(t2)
-
-	var i, j int
-	for i, j = 0, 0; i < len(t1) && j < len(t2); i, j = i+1, j+1 {
-		if t2[j] == id {
-			i--
-			continue
-		} else if t1[i] == id {
-			j--
-			continue
-		}
-		if t1[i] != t1[j] {
-			return false
-		}
-	}
-
-	if i < len(t1)-1 && j < len(t2) || i < len(t1) && j < len(t2)-1 {
-		return false
-	}
-
-	return true
 }
