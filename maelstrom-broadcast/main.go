@@ -2,22 +2,32 @@ package main
 
 import (
 	"encoding/json"
-	// "errors"
 	"fmt"
-	// "strconv"
-
-	// "fmt"
 	"log"
 	"sort"
+	"sync"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
 
-type nodeHandlerFunc func(maelstrom.Message) (any, error)
+type store struct {
+	mu   *sync.RWMutex
+	list []int
+}
 
-type messageStore []int
+func (s *store) append(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.list = append(s.list, n)
+}
 
-var seen messageStore
+func (s *store) get() []int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	newList := make([]int, len(s.list))
+	copy(newList, s.list)
+	return newList
+}
 
 func main() {
 	err := run()
@@ -28,13 +38,18 @@ func main() {
 
 func run() error {
 	var (
-		n   *maelstrom.Node
-		err error
+		n    *maelstrom.Node
+		seen *store
+		err  error
 	)
 
 	n = maelstrom.NewNode()
 
-	registerHandles(n)
+	seen = &store{
+		mu: &sync.RWMutex{},
+	}
+
+	registerHandles(n, seen)
 
 	err = n.Run()
 	if err != nil {
@@ -44,14 +59,9 @@ func run() error {
 	return nil
 }
 
-func registerHandles(n *maelstrom.Node) {
-	storeWrite := make(chan int)
-	storeRead := make(chan (chan []int))
-
-	go store(storeRead, storeWrite)
-
+func registerHandles(n *maelstrom.Node, seen *store) {
 	n.Handle("broadcast", func(msg maelstrom.Message) error {
-		resp, err := handleBroadcast(msg, storeWrite)
+		resp, err := handleBroadcast(msg, seen)
 		if err != nil {
 			return err
 		}
@@ -59,7 +69,7 @@ func registerHandles(n *maelstrom.Node) {
 	})
 
 	n.Handle("read", func(msg maelstrom.Message) error {
-		resp, err := handleRead(msg, storeRead)
+		resp, err := handleRead(msg, seen)
 		if err != nil {
 			return err
 		}
@@ -67,7 +77,7 @@ func registerHandles(n *maelstrom.Node) {
 	})
 
 	n.Handle("topology", func(msg maelstrom.Message) error {
-		resp, err := handleTopology(n, msg, storeRead)
+		resp, err := handleTopology(n, msg)
 		if err != nil {
 			return err
 		}
@@ -77,46 +87,8 @@ func registerHandles(n *maelstrom.Node) {
 	// registerHandle(n, "broadcast", handleBroadcast)
 }
 
-func store(r <-chan (chan []int), w <-chan int) {
-	var store []int
+func handleBroadcast(msg maelstrom.Message, seen *store) (any, error) {
 
-	for {
-		select {
-		case ch := <-r:
-			ch <- store
-			close(ch)
-
-		case val := <-w:
-			store = append(store, val)
-		}
-	}
-}
-
-func registerHandle(n *maelstrom.Node, typ string, fn nodeHandlerFunc) {
-	n.Handle(typ, addHandle(n, typ, fn))
-}
-
-func addHandle(n *maelstrom.Node, typ string, fn nodeHandlerFunc) maelstrom.HandlerFunc {
-	return func(msg maelstrom.Message) error {
-		_, err := fn(msg)
-		return err
-	}
-}
-
-func addReplyHandle(n *maelstrom.Node, typ string, fn nodeHandlerFunc) maelstrom.HandlerFunc {
-	return func(msg maelstrom.Message) error {
-		body, err := fn(msg)
-		if err != nil {
-			return err
-		}
-
-		return n.Reply(msg, body)
-	}
-}
-
-func handleBroadcast(msg maelstrom.Message, store chan<- int) (any, error) {
-
-	// var body map[string]any
 	var body struct {
 		Message int `json:"message"`
 	}
@@ -125,21 +97,7 @@ func handleBroadcast(msg maelstrom.Message, store chan<- int) (any, error) {
 		return nil, err
 	}
 
-	store <- body.Message
-
-	// switch message.(type) {
-	// case int:
-	// 	store <- message.(int)
-	// case string:
-	// 	num, err := strconv.Atoi(message.(string))
-	// 	if err != nil {
-	// 		return errors.New("message is string, not an integer")
-	// 	}
-	// 	store <- num
-	// default:
-	// 	fmt.Println()
-	// 	return errors.New("message is not an integer")
-	// }
+	seen.append(body.Message)
 
 	resp := map[string]string{
 		"type": "broadcast_ok",
@@ -148,17 +106,14 @@ func handleBroadcast(msg maelstrom.Message, store chan<- int) (any, error) {
 	return resp, nil
 }
 
-func handleRead(msg maelstrom.Message, read chan<- (chan []int)) (any, error) {
+func handleRead(msg maelstrom.Message, seen *store) (any, error) {
 	var body map[string]any
 	err := json.Unmarshal(msg.Body, &body)
 	if err != nil {
 		return nil, err
 	}
 
-	resp := make(chan []int)
-
-	read <- resp
-	messages := <-resp
+	messages := seen.get()
 
 	body["type"] = "read_ok"
 	body["messages"] = messages
@@ -166,45 +121,35 @@ func handleRead(msg maelstrom.Message, read chan<- (chan []int)) (any, error) {
 	return body, nil
 }
 
-func handleTopology(n *maelstrom.Node, msg maelstrom.Message, read chan<- chan []int) (any, error) {
+func handleTopology(n *maelstrom.Node, msg maelstrom.Message) (any, error) {
 	var body struct {
-		MsgID    int                 `json:"msg_id"`
-		Typ      string              `json:"type"`
 		Topology map[string][]string `json:"topology"`
 	}
 	err := json.Unmarshal(msg.Body, &body)
 	if err != nil {
 		return nil, err
 	}
-	// fmt.Println(body, body.Topology)
-
-	// topology, ok := body.topology
-	// if !ok {
-	// 	return nil, errors.New("no topology received")
-	// }
-
-	// fmt.Printf("%t\n", topology)
 
 	id := n.ID()
 	neighbours := n.NodeIDs()
 
 	neighboursReq, ok := body.Topology[id]
 
-	ok = compareTopology(id, append(neighboursReq, id), neighbours)
+	ok = compareTopology(id, neighboursReq, neighbours)
 	if !ok {
-		return nil, fmt.Errorf("topology not ok, %s, %s, %s, %+v, id: %s", neighboursReq, neighbours, body.Topology, body, id)
+		return nil, fmt.Errorf("topology not ok: got %s, have %s", neighboursReq, neighbours)
 	}
 
-	resp := make(map[string]string)
-	resp["type"] = "topology_ok"
-
-	body.Typ = "topology_ok"
+	resp := map[string]string{
+		"type": "topology_ok",
+	}
 
 	return resp, nil
 }
 
 func compareTopology(id string, t1 []string, t2 []string) bool {
-	if len(t1) != len(t2) {
+	lenDiff := len(t1) - len(t2)
+	if -1 > lenDiff || lenDiff > 1 {
 		return false
 	}
 
@@ -215,13 +160,22 @@ func compareTopology(id string, t1 []string, t2 []string) bool {
 	sort.Strings(t1)
 	sort.Strings(t2)
 
-	for i, n1 := range t1 {
-		if t2[i] != n1 {
-			return false
-		}
-		if n1 == id {
+	var i, j int
+	for i, j = 0, 0; i < len(t1) && j < len(t2); i, j = i+1, j+1 {
+		if t2[j] == id {
+			i--
+			continue
+		} else if t1[i] == id {
+			j--
 			continue
 		}
+		if t1[i] != t1[j] {
+			return false
+		}
+	}
+
+	if i < len(t1)-1 && j < len(t2) || i < len(t1) && j < len(t2)-1 {
+		return false
 	}
 
 	return true
