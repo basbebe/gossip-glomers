@@ -340,10 +340,9 @@ func handleTopology(state *nodeState, msg maelstrom.Message) (any, error) {
 
 func handleGossip(state *nodeState, msg maelstrom.Message) error {
 	var body struct {
-		Source     nodeID `json:"source"`
-		HaveSize   int    `json:"haveSize"`
-		AssumeSize int    `json:"assumeSize"`
-		Messages   []int  `json:"messages"`
+		HaveSize   int   `json:"haveSize"`
+		AssumeSize int   `json:"assumeSize"`
+		Messages   []int `json:"messages"`
 	}
 	err := json.Unmarshal(msg.Body, &body)
 	if err != nil {
@@ -351,9 +350,9 @@ func handleGossip(state *nodeState, msg maelstrom.Message) error {
 	}
 	// fmt.Printf("got gossip: %+v, %+v", msg, body)
 
-	state.matchGossip(body.Source, body.Messages)
+	state.matchGossip(nodeID(msg.Src), body.Messages)
 
-	return replyGossip(state, body.Source, body.AssumeSize)
+	return replyGossip(state, nodeID(msg.Src), body.AssumeSize)
 	// return nil
 }
 
@@ -370,7 +369,6 @@ func replyGossip(state *nodeState, node nodeID, assumed int) error {
 
 	body := map[string]any{
 		"type":       "gossip_reply",
-		"source":     state.id,
 		"haveSize":   have,
 		"assumeSize": assume,
 		"messages":   delta,
@@ -387,10 +385,9 @@ func replyGossip(state *nodeState, node nodeID, assumed int) error {
 
 func handleGossipReply(state *nodeState, msg maelstrom.Message) error {
 	var body struct {
-		Source     nodeID `json:"source"`
-		HaveSize   int    `json:"haveSize"`
-		AssumeSize int    `json:"assumeSize"`
-		Messages   []int  `json:"messages"`
+		HaveSize   int   `json:"haveSize"`
+		AssumeSize int   `json:"assumeSize"`
+		Messages   []int `json:"messages"`
 	}
 	err := json.Unmarshal(msg.Body, &body)
 	if err != nil {
