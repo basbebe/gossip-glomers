@@ -45,6 +45,7 @@ type nodeState struct {
 
 	stateLock  *sync.RWMutex
 	nodeStates map[nodeID]stateSet
+	stateFail  bool
 
 	topoLock *sync.RWMutex
 	topology []nodeID
@@ -66,7 +67,7 @@ func (s *nodeState) appendValue(n int) {
 	s.nodeStates[s.id].add(n)
 }
 
-func (s *nodeState) deltaGossip(node nodeID) (have int, assume int, delta []int) {
+func (s *nodeState) deltaGossip(node nodeID) (have int, assume int, delta []int, unstable bool) {
 	s.stateLock.Lock()
 	defer s.stateLock.Unlock()
 
@@ -76,6 +77,8 @@ func (s *nodeState) deltaGossip(node nodeID) (have int, assume int, delta []int)
 		deltaState = s.nodeStates[node]
 	}
 
+	unstable = s.stateFail || len(s.nodeStates[node]) == 0
+
 	for val := range s.nodeStates[s.id] {
 		if !deltaState.exists(val) {
 			delta = append(delta, val)
@@ -83,7 +86,7 @@ func (s *nodeState) deltaGossip(node nodeID) (have int, assume int, delta []int)
 	}
 	// fmt.Println("delta: ", delta)
 
-	return len(s.nodeStates[s.id]), len(s.nodeStates[node]), delta
+	return len(s.nodeStates[s.id]), len(s.nodeStates[node]), delta, unstable
 }
 
 func (s *nodeState) diffGossip(node nodeID, state []int) {
@@ -93,7 +96,7 @@ func (s *nodeState) diffGossip(node nodeID, state []int) {
 	s.nodeStates[node].merge(state)
 }
 
-func (s *nodeState) matchGossip(node nodeID, state []int) {
+func (s *nodeState) matchGossip(node nodeID, state []int, has int, assumes int) bool {
 	s.stateLock.Lock()
 	defer s.stateLock.Unlock()
 
@@ -110,7 +113,28 @@ func (s *nodeState) matchGossip(node nodeID, state []int) {
 	}
 	s.nodeStates[node].merge(state)
 
-	return
+	if has > len(ownState) {
+		s.nodeStates[node] = make(stateSet)
+		s.stateFail = true
+		return false
+	}
+
+	if has-assumes < len(state) {
+		return false
+	}
+
+	if s.stateFail && has == len(ownState) {
+		s.stateFail = false
+	}
+
+	return true
+}
+
+func (s *nodeState) resetGossip(node nodeID) {
+	s.stateLock.Lock()
+	defer s.stateLock.Unlock()
+
+	s.nodeStates[node] = make(stateSet)
 }
 
 func (s *nodeState) getStateList() []int {
@@ -266,10 +290,11 @@ func gossip(state *nodeState) {
 }
 
 func gossipSend(state *nodeState, id nodeID, node nodeID) error {
-	have, assume, delta := state.deltaGossip(node)
+	have, assume, delta, unstable := state.deltaGossip(node)
 	if len(delta) == 0 {
 		return nil
 	}
+
 	body := map[string]any{
 		"type":       "gossip",
 		"source":     id,
@@ -277,12 +302,17 @@ func gossipSend(state *nodeState, id nodeID, node nodeID) error {
 		"assumeSize": assume,
 		"messages":   delta,
 	}
+
+	if len(delta) == have || unstable {
+		body["init"] = true
+	}
+
 	err := state.Node.Send(string(node), body)
 	if err != nil {
 		return err
 	}
 
-	state.diffGossip(node, delta)
+	// state.diffGossip(node, delta)
 
 	// return state.Node.RPC(id, body, nil)
 	return nil
@@ -343,6 +373,7 @@ func handleGossip(state *nodeState, msg maelstrom.Message) error {
 		HaveSize   int   `json:"haveSize"`
 		AssumeSize int   `json:"assumeSize"`
 		Messages   []int `json:"messages"`
+		Init       bool  `json:"init,omitempty"`
 	}
 	err := json.Unmarshal(msg.Body, &body)
 	if err != nil {
@@ -350,28 +381,40 @@ func handleGossip(state *nodeState, msg maelstrom.Message) error {
 	}
 	// fmt.Printf("got gossip: %+v, %+v", msg, body)
 
-	state.matchGossip(nodeID(msg.Src), body.Messages)
+	ok := state.matchGossip(nodeID(msg.Src), body.Messages, body.HaveSize, body.AssumeSize)
+	if !ok {
+		// state.resetGossip(nodeID(msg.Src))
+	}
+
+	if body.Init {
+		state.resetGossip(nodeID(msg.Src))
+		// fmt.Print("reset, ", msg.Src)
+	}
 
 	return replyGossip(state, nodeID(msg.Src), body.AssumeSize)
 	// return nil
 }
 
 func replyGossip(state *nodeState, node nodeID, assumed int) error {
-	have, assume, delta := state.deltaGossip(node)
+	have, assume, delta, unstable := state.deltaGossip(node)
 
 	if len(delta) < 1 {
 		return nil
 	}
 
-	if assumed < have {
+	// if assumed < have {
 
-	}
+	// }
 
 	body := map[string]any{
 		"type":       "gossip_reply",
 		"haveSize":   have,
 		"assumeSize": assume,
 		"messages":   delta,
+	}
+
+	if unstable {
+		body["init"] = true
 	}
 
 	err := state.Node.Send(string(node), body)
@@ -388,6 +431,7 @@ func handleGossipReply(state *nodeState, msg maelstrom.Message) error {
 		HaveSize   int   `json:"haveSize"`
 		AssumeSize int   `json:"assumeSize"`
 		Messages   []int `json:"messages"`
+		Init       bool  `json:"init,omitempty"`
 	}
 	err := json.Unmarshal(msg.Body, &body)
 	if err != nil {
@@ -395,7 +439,14 @@ func handleGossipReply(state *nodeState, msg maelstrom.Message) error {
 	}
 	// fmt.Printf("got response: %+v", body)
 
-	state.matchGossip(body.Source, body.Messages)
+	ok := state.matchGossip(nodeID(msg.Src), body.Messages, body.HaveSize, body.AssumeSize)
+	if !ok {
+		// state.resetGossip(nodeID(msg.Src))
+	}
+
+	if body.Init {
+		state.resetGossip(nodeID(msg.Src))
+	}
 
 	return nil
 }
