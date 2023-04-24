@@ -13,8 +13,8 @@ import (
 )
 
 const (
-	gossipNodesNr  = 6
-	gossipInterval = time.Duration(1000 * time.Millisecond)
+	gossipNodesNr  = 8
+	gossipInterval = time.Duration(100 * time.Millisecond)
 )
 
 var stderr = os.Stderr
