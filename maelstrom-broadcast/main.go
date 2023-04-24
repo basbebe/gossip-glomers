@@ -2,13 +2,10 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
-	"os"
-
-	// "fmt"
 	"log"
 	"math/rand"
+	"os"
 	"sync"
 	"time"
 
@@ -16,7 +13,7 @@ import (
 )
 
 const (
-	gossipNodesNr  = 2
+	gossipNodesNr  = 6
 	gossipInterval = time.Duration(1000 * time.Millisecond)
 )
 
@@ -42,17 +39,6 @@ func (s stateSet) exists(v int) bool {
 	_, ok := s[v]
 	return ok
 }
-
-// func (s stateSet) merge(s2 []int) {
-// 	for _, val := range s2 {
-// 		s.add(val)
-// 	}
-// }
-// func (s stateSet) union2(s2 stateSet) {
-// 	for val := range s2 {
-// 		s.add(val)
-// 	}
-// }
 
 type gossipMessage struct {
 	Type             string       `json:"type"`
@@ -103,7 +89,6 @@ func (s *nodeState) deltaGossip(node nodeID, to stateVersion) *gossipMessage {
 	if !ok {
 		data = &stateData{}
 		s.nodeStates[node] = data
-		// data =
 	}
 
 	curr, local, remote := s.version, data.localVersion, data.remoteVersion
@@ -112,16 +97,12 @@ func (s *nodeState) deltaGossip(node nodeID, to stateVersion) *gossipMessage {
 	}
 	from := local
 
-	fmt.Fprintf(stderr, "DEBUG: Creating delta from %d to %d\n", from, to)
-
 	delta := []int{}
 	for val, ver := range s.values {
 		if from < ver && ver <= to {
 			delta = append(delta, int(val))
 		}
 	}
-	fmt.Fprintf(stderr, "DEBUG: delta: %v\n", delta)
-	fmt.Fprintf(stderr, "DEBUG: state: %+v\n", s.values)
 
 	msg := &gossipMessage{
 		Current:          curr,
@@ -132,13 +113,6 @@ func (s *nodeState) deltaGossip(node nodeID, to stateVersion) *gossipMessage {
 
 	return msg
 }
-
-// func (s *nodeState) diffGossip(node nodeID, state []int) {
-// 	s.stateLock.Lock()
-// 	defer s.stateLock.Unlock()
-
-// 	s.nodeStates[node].merge(state)
-// }
 
 func (s *nodeState) matchGossip(node nodeID, state []int, curr stateVersion, sentRemoteVer stateVersion, gotLocalVer stateVersion) (last stateVersion, unchanged bool) {
 	s.stateLock.Lock()
@@ -154,40 +128,25 @@ func (s *nodeState) matchGossip(node nodeID, state []int, curr stateVersion, sen
 	for _, val := range state {
 		if !s.values.exists(val) {
 			if inc {
-				// fmt.Fprintf(stderr, "DEBUG: Increasing version %d\n", s.version)
 				s.version++
-				// fmt.Fprintf(stderr, "DEBUG: Increased version %d\n", s.version)
 				inc = false
 			}
 			s.values.add(val, s.version)
-			// fmt.Fprintf(stderr, "DEBUG: adding %d with version %d\n", val, s.version)
 		}
 	}
 
-	// fmt.Fprintf(stderr, "DEBUG: local - curr: %d, has: %d, have: %d\n", s.version, gotLocalVer, int(data.localVersion))
 	data.localVersion = gotLocalVer
 
 	if sentRemoteVer != data.remoteVersion {
-		// data.Received = 0
-		fmt.Fprintf(stderr, "DEBUG: fail. remote has: %d, have: %d\n", sentRemoteVer, int(data.remoteVersion))
-		// data.Sent = 0
 		return 0, false
 	}
-	fmt.Fprintf(stderr, "DEBUG: remote - has: %d, have: %d\n", sentRemoteVer, int(data.remoteVersion))
+
 	data.remoteVersion = curr
-	// data.Received = curr
 	if gotLocalVer != s.version {
 		return 0, false
 	}
 	return 0, true
 }
-
-// func (s *nodeState) resetGossip(node nodeID) {
-// 	s.stateLock.Lock()
-// 	defer s.stateLock.Unlock()
-
-// 	s.nodeStates[node] = &stateData{}
-// }
 
 func (s *nodeState) updateGossipState(node nodeID, ver stateVersion) {
 	s.stateLock.Lock()
@@ -205,12 +164,6 @@ func (s *nodeState) getStateList() []int {
 	s.stateLock.RLock()
 	defer s.stateLock.RUnlock()
 
-	// state, ok := s.nodeStates[s.id]
-	// if !ok {
-	// 	panic("ah")
-	// }
-	// fmt.Println(s, s.nodeStates, state)
-
 	newStateList := make([]int, len(s.values))
 	i := 0
 	for v := range s.values {
@@ -221,41 +174,24 @@ func (s *nodeState) getStateList() []int {
 	return newStateList
 }
 
-// func (s *nodeState) getIDState(id nodeID) stateSet {
-// 	s.stateLock.RLock()
-// 	defer s.stateLock.RUnlock()
-
-// 	state := s.nodeStates[id]
-// 	newState := make(stateSet, len(state))
-// 	for v := range state {
-// 		newState.add(v)
-// 	}
-
-// 	return newState
-// }
-
 func (s *nodeState) setTopology(topology map[string][]string) error {
 	s.topoLock.Lock()
 	defer s.topoLock.Unlock()
 
 	if len(s.nodeStates) == 0 {
-		s.id = nodeID(s.Node.ID())
-	}
-	id := s.Node.ID()
-
-	_, ok := s.nodeStates[s.id]
-	if !ok {
-		s.nodeStates[s.id] = &stateData{}
-	}
-
-	topo, ok := topology[id]
-	if !ok {
-		return errors.New("could not set topology")
-	}
-
-	s.topology = s.topology[:0]
-	for _, id := range topo {
-		s.topology = append(s.topology, nodeID(id))
+		id := nodeID(s.Node.ID())
+		s.id = id
+		ids := s.Node.NodeIDs()
+		s.topology = make([]nodeID, len(ids)-1)
+		i := 0
+		for _, node := range ids {
+			if node == string(id) {
+				continue
+			}
+			s.nodeStates[nodeID(node)] = &stateData{}
+			s.topology[i] = nodeID(node)
+			i++
+		}
 	}
 
 	return nil
@@ -346,19 +282,18 @@ func gossip(state *nodeState) {
 		return
 	}
 
-	for i := 0; i < gossipNodesNr; i++ {
-		node := state.topology[rand.Intn(len(state.topology))]
-		id := state.id
-		go gossipSend(state, id, node)
+	for i := 0; i < gossipNodesNr && i < len(state.topology); i++ {
+		randIndex := rand.Intn(len(state.topology))
+		node := state.topology[randIndex]
+		go gossipSend(state, node)
 	}
 }
 
-func gossipSend(state *nodeState, id nodeID, node nodeID) error {
-	// data, ok := state
+func gossipSend(state *nodeState, node nodeID) error {
 	body := state.deltaGossip(node, 0)
-	// if len(delta) == 0 || curr == sent {
-	// 	return nil
-	// }
+	if node == "" {
+		panic(state)
+	}
 	body.Type = "gossip"
 
 	if body.Current == body.SentLocalVersion {
@@ -367,14 +302,10 @@ func gossipSend(state *nodeState, id nodeID, node nodeID) error {
 
 	err := state.Node.Send(string(node), body)
 	if err != nil {
+		fmt.Println(node)
 		return err
 	}
 
-	// state.updateGossipState(node, body.Current)
-
-	// state.diffGossip(node, delta)
-
-	// return state.Node.RPC(id, body, nil)
 	return nil
 }
 
@@ -438,11 +369,9 @@ func handleGossip(state *nodeState, msg maelstrom.Message) error {
 	last, unchanged := state.matchGossip(nodeID(msg.Src), body.Messages, body.Current, body.SentLocalVersion, body.GotRemoteVersion)
 	if unchanged {
 		return nil
-		// state.resetGossip(nodeID(msg.Src))
 	}
 
 	return replyGossip(state, nodeID(msg.Src), last)
-	// return nil
 }
 
 func replyGossip(state *nodeState, node nodeID, lastRecv stateVersion) error {
@@ -455,7 +384,6 @@ func replyGossip(state *nodeState, node nodeID, lastRecv stateVersion) error {
 		return err
 	}
 
-	// state.updateGossipState(node, body.Current)
 	return nil
 }
 
@@ -466,12 +394,7 @@ func handleGossipReply(state *nodeState, msg maelstrom.Message) error {
 		return err
 	}
 
-	_, ok := state.matchGossip(nodeID(msg.Src), body.Messages, body.Current, body.SentLocalVersion, body.GotRemoteVersion)
-	if !ok {
-		// state.resetGossip(nodeID(msg.Src))
-	}
-
-	// state.updateGossipState(nodeID(msg.Src), body.Current)
+	state.matchGossip(nodeID(msg.Src), body.Messages, body.Current, body.SentLocalVersion, body.GotRemoteVersion)
 
 	return nil
 }
