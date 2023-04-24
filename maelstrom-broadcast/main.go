@@ -12,7 +12,7 @@ import (
 
 const (
 	gossipNodesNr  = 8
-	gossipInterval = time.Duration(100 * time.Millisecond)
+	gossipInterval = time.Duration(200 * time.Millisecond)
 )
 
 type nodeID string
@@ -125,16 +125,17 @@ func (s *nodeState) matchGossip(data *stateData, msg *gossipMessage) bool {
 	data.dataLock.Lock()
 	defer data.dataLock.Unlock()
 
-	if msg.SentLocalVersion != data.remoteVersion {
+	data.localVersion = msg.GotRemoteVersion
+	if msg.SentLocalVersion > data.remoteVersion {
 		return false
 	}
 
-	data.localVersion = msg.GotRemoteVersion
 	data.remoteVersion = msg.Current
 
 	if msg.GotRemoteVersion != s.version {
 		return false
 	}
+
 	return true
 }
 
@@ -261,9 +262,16 @@ func gossip(state *nodeState) {
 		return
 	}
 
+	nodeSelection := make(map[nodeID]struct{}, gossipNodesNr)
+
 	for i := 0; i < gossipNodesNr && i < len(state.topology); i++ {
 		randIndex := rand.Intn(len(state.topology))
 		node := state.topology[randIndex]
+		_, exists := nodeSelection[node]
+		if exists {
+			i--
+			continue
+		}
 		go gossipSend(state, node)
 	}
 }
@@ -358,6 +366,10 @@ func handleGossip(state *nodeState, msg maelstrom.Message) error {
 func replyGossip(state *nodeState, node nodeID, messages []int) error {
 	body := state.deltaGossip(state.nodeStates[node], messages)
 	body.IsReply = true
+
+	if len(body.Messages) == 0 && body.SentLocalVersion == body.Current {
+		return nil
+	}
 
 	err := state.Node.Send(string(node), body)
 	if err != nil {
