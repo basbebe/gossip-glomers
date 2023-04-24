@@ -42,6 +42,7 @@ func (s stateSet) exists(v int) bool {
 
 type gossipMessage struct {
 	Type             string       `json:"type"`
+	IsReply          bool         `json:"isReply"`
 	Current          stateVersion `json:"current"`
 	SentLocalVersion stateVersion `json:"sentLocalVersion"`
 	GotRemoteVersion stateVersion `json:"gotRemoteVersion"`
@@ -105,6 +106,7 @@ func (s *nodeState) deltaGossip(node nodeID, to stateVersion) *gossipMessage {
 	}
 
 	msg := &gossipMessage{
+		Type:             "gossip",
 		Current:          curr,
 		SentLocalVersion: local,
 		GotRemoteVersion: remote,
@@ -232,7 +234,6 @@ func registerHandles(state *nodeState) {
 	registerHandleReply(state, "read", handleRead)
 	registerHandleReply(state, "topology", handleTopology)
 	registerHandle(state, "gossip", handleGossip)
-	registerHandle(state, "gossip_reply", handleGossipReply)
 }
 
 func registerHandleReply(state *nodeState, typ string, fn func(*nodeState, maelstrom.Message) (any, error)) {
@@ -371,30 +372,22 @@ func handleGossip(state *nodeState, msg maelstrom.Message) error {
 		return nil
 	}
 
+	if body.IsReply {
+		return nil
+	}
+
 	return replyGossip(state, nodeID(msg.Src), last)
 }
 
 func replyGossip(state *nodeState, node nodeID, lastRecv stateVersion) error {
 	body := state.deltaGossip(node, lastRecv)
 
-	body.Type = "gossip_reply"
+	body.IsReply = true
 
 	err := state.Node.Send(string(node), body)
 	if err != nil {
 		return err
 	}
-
-	return nil
-}
-
-func handleGossipReply(state *nodeState, msg maelstrom.Message) error {
-	var body *gossipMessage
-	err := json.Unmarshal(msg.Body, &body)
-	if err != nil {
-		return err
-	}
-
-	state.matchGossip(nodeID(msg.Src), body.Messages, body.Current, body.SentLocalVersion, body.GotRemoteVersion)
 
 	return nil
 }
