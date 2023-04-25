@@ -1,5 +1,5 @@
 {
-  description = "A dev environment for Fly.io Gossip Gloomers challenge";
+  description = "A dev environment for Fly.io Gossip Glomers challenge";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -43,7 +43,7 @@
         in
         {
           devShell = pkgs.mkShell {
-            name = "Gossip Gloomers env";
+            name = "Gossip Glomers env";
 
             buildInputs = with pkgs; [
               maelstrom
