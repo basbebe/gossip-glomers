@@ -12,7 +12,7 @@ import (
 
 const (
 	gossipNodesNr  = 8
-	gossipInterval = time.Duration(200 * time.Millisecond)
+	gossipInterval = time.Duration(500 * time.Millisecond)
 )
 
 type nodeID string
