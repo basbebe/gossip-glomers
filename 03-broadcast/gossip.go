@@ -34,30 +34,30 @@ type gossipMessage struct {
 	Messages         []int        `json:"messages"`
 }
 
-type nodeState struct {
+type gossipNode struct {
 	Node *maelstrom.Node
 	id   nodeID
 
 	stateLock  *sync.RWMutex
 	version    stateVersion
-	nodeStates map[nodeID]*stateData
 	values     stateSet
+	nodeStates map[nodeID]*stateData
 
 	topoLock *sync.RWMutex
 	topology []nodeID
 }
 
-func NewNodeState(n *maelstrom.Node) *nodeState {
-	return &nodeState{
+func NewGossipNode(n *maelstrom.Node) *gossipNode {
+	return &gossipNode{
 		Node:       n,
 		stateLock:  &sync.RWMutex{},
-		nodeStates: make(map[nodeID]*stateData),
 		values:     make(stateSet),
+		nodeStates: make(map[nodeID]*stateData),
 		topoLock:   &sync.RWMutex{},
 	}
 }
 
-func (s *nodeState) appendValue(v int) {
+func (s *gossipNode) appendValue(v int) {
 	s.stateLock.Lock()
 	defer s.stateLock.Unlock()
 	if _, exists := s.values[v]; !exists {
@@ -66,7 +66,7 @@ func (s *nodeState) appendValue(v int) {
 	}
 }
 
-func (s *nodeState) appendValueSlice(values []int) {
+func (s *gossipNode) appendValueSlice(values []int) {
 	var doInc bool = true
 	var version stateVersion
 
@@ -85,7 +85,7 @@ func (s *nodeState) appendValueSlice(values []int) {
 	}
 }
 
-func (s *nodeState) deltaGossip(data *stateData, omit []int) *gossipMessage {
+func (s *gossipNode) deltaGossip(data *stateData, omit []int) *gossipMessage {
 	s.stateLock.RLock()
 	defer s.stateLock.RUnlock()
 	current := s.version
@@ -118,7 +118,7 @@ loop:
 	return msg
 }
 
-func (s *nodeState) matchGossip(data *stateData, msg *gossipMessage) bool {
+func (s *gossipNode) matchGossip(data *stateData, msg *gossipMessage) bool {
 	go s.appendValueSlice(msg.Messages)
 
 	data.dataLock.Lock()
@@ -138,7 +138,7 @@ func (s *nodeState) matchGossip(data *stateData, msg *gossipMessage) bool {
 	return true
 }
 
-func (s *nodeState) getStateList() []int {
+func (s *gossipNode) getValueList() []int {
 	s.stateLock.RLock()
 	defer s.stateLock.RUnlock()
 
@@ -152,7 +152,7 @@ func (s *nodeState) getStateList() []int {
 	return newStateList
 }
 
-func (s *nodeState) setTopology(topology map[string][]string) error {
+func (s *gossipNode) setTopology(topology map[string][]string) error {
 	s.topoLock.Lock()
 	defer s.topoLock.Unlock()
 
@@ -177,14 +177,14 @@ func (s *nodeState) setTopology(topology map[string][]string) error {
 	return nil
 }
 
-func registerHandles(state *nodeState) {
+func registerHandles(state *gossipNode) {
 	registerHandleReply(state, "broadcast", handleBroadcast)
 	registerHandleReply(state, "read", handleRead)
 	registerHandleReply(state, "topology", handleTopology)
 	registerHandle(state, "gossip", handleGossip)
 }
 
-func registerHandleReply(state *nodeState, typ string, fn func(*nodeState, maelstrom.Message) (any, error)) {
+func registerHandleReply(state *gossipNode, typ string, fn func(*gossipNode, maelstrom.Message) (any, error)) {
 	h := state.Node.Handle
 
 	handlerFunc := func(msg maelstrom.Message) error {
@@ -199,7 +199,7 @@ func registerHandleReply(state *nodeState, typ string, fn func(*nodeState, maels
 	h(typ, handlerFunc)
 }
 
-func registerHandle(state *nodeState, typ string, fn func(*nodeState, maelstrom.Message) error) {
+func registerHandle(state *gossipNode, typ string, fn func(*gossipNode, maelstrom.Message) error) {
 	h := state.Node.Handle
 
 	handlerFunc := func(msg maelstrom.Message) error {
@@ -214,7 +214,7 @@ func registerHandle(state *nodeState, typ string, fn func(*nodeState, maelstrom.
 	h(typ, handlerFunc)
 }
 
-func runGossip(state *nodeState) error {
+func runGossip(state *gossipNode) error {
 	rand.Seed(time.Now().UnixNano())
 
 	for {
@@ -223,7 +223,7 @@ func runGossip(state *nodeState) error {
 	}
 }
 
-func gossip(state *nodeState) {
+func gossip(state *gossipNode) {
 	state.topoLock.RLock()
 	defer state.topoLock.RUnlock()
 
@@ -245,7 +245,7 @@ func gossip(state *nodeState) {
 	}
 }
 
-func gossipSend(state *nodeState, node nodeID) error {
+func gossipSend(state *gossipNode, node nodeID) error {
 	body := state.deltaGossip(state.nodeStates[node], nil)
 	body.Type = "gossip"
 
@@ -261,7 +261,7 @@ func gossipSend(state *nodeState, node nodeID) error {
 	return nil
 }
 
-func handleBroadcast(state *nodeState, msg maelstrom.Message) (any, error) {
+func handleBroadcast(state *gossipNode, msg maelstrom.Message) (any, error) {
 	var body struct {
 		Message int `json:"message"`
 	}
@@ -279,8 +279,8 @@ func handleBroadcast(state *nodeState, msg maelstrom.Message) (any, error) {
 	return resp, nil
 }
 
-func handleRead(state *nodeState, msg maelstrom.Message) (any, error) {
-	messages := state.getStateList()
+func handleRead(state *gossipNode, msg maelstrom.Message) (any, error) {
+	messages := state.getValueList()
 
 	body := map[string]any{
 		"type":     "read_ok",
@@ -290,7 +290,7 @@ func handleRead(state *nodeState, msg maelstrom.Message) (any, error) {
 	return body, nil
 }
 
-func handleTopology(state *nodeState, msg maelstrom.Message) (any, error) {
+func handleTopology(state *gossipNode, msg maelstrom.Message) (any, error) {
 	var body struct {
 		Topology map[string][]string `json:"topology"`
 	}
@@ -311,7 +311,7 @@ func handleTopology(state *nodeState, msg maelstrom.Message) (any, error) {
 	return resp, nil
 }
 
-func handleGossip(state *nodeState, msg maelstrom.Message) error {
+func handleGossip(state *gossipNode, msg maelstrom.Message) error {
 	var body *gossipMessage
 	err := json.Unmarshal(msg.Body, &body)
 	if err != nil {
@@ -332,7 +332,7 @@ func handleGossip(state *nodeState, msg maelstrom.Message) error {
 	return replyGossip(state, nodeID(msg.Src), body.Messages)
 }
 
-func replyGossip(state *nodeState, node nodeID, messages []int) error {
+func replyGossip(state *gossipNode, node nodeID, messages []int) error {
 	body := state.deltaGossip(state.nodeStates[node], messages)
 	body.IsReply = true
 

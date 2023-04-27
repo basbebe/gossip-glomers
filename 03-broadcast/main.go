@@ -27,7 +27,7 @@ func run() error {
 
 	n = maelstrom.NewNode()
 
-	state = NewNodeState(n)
+	state = NewGossipNode(n)
 
 	registerHandles(state)
 
