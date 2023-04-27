@@ -6,11 +6,6 @@ import (
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
 
-// const (
-// 	gossipNodesNr  = 8
-// 	gossipInterval = time.Duration(500 * time.Millisecond)
-// )
-
 func main() {
 	err := run()
 	if err != nil {
@@ -20,18 +15,18 @@ func main() {
 
 func run() error {
 	var (
-		n     *maelstrom.Node
-		state *gossipNode
-		err   error
+		n          *maelstrom.Node
+		gossipNode *gossipNode
+		err        error
 	)
 
 	n = maelstrom.NewNode()
 
-	state = NewGossipNode(n)
+	gossipNode = NewGossipNode(n)
 
-	registerHandles(state)
+	registerHandles(gossipNode)
 
-	go runGossip(state)
+	go runGossip(gossipNode)
 
 	err = n.Run()
 	if err != nil {
