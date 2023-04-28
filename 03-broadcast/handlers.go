@@ -69,7 +69,7 @@ func handleGossip(gn *gossipNode, msg maelstrom.Message) error {
 		return err
 	}
 
-	data, ok := gn.nodeStates[nodeID(msg.Src)]
+	data, ok := gn.clusterData[nodeID(msg.Src)]
 	if !ok {
 		panic("node state not found")
 	}
@@ -84,7 +84,7 @@ func handleGossip(gn *gossipNode, msg maelstrom.Message) error {
 }
 
 func replyGossip(gn *gossipNode, node nodeID, messages []int) error {
-	body := gn.deltaGossip(gn.nodeStates[node], messages)
+	body := gn.deltaGossip(gn.clusterData[node], messages)
 	body.IsReply = true
 
 	if len(body.Messages) == 0 && body.SentLocalVersion == body.Current {

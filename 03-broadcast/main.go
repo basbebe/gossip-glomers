@@ -26,7 +26,7 @@ func run() error {
 
 	registerHandles(gossipNode)
 
-	go runGossip(gossipNode)
+	go gossipNode.runGossip()
 
 	err = n.Run()
 	if err != nil {
