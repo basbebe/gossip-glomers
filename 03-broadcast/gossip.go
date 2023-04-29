@@ -152,12 +152,14 @@ func (gn *gossipNode) deltaGossip(data *stateData, omit []int) *gossipMessage {
 }
 
 func (gn *gossipNode) mergeGossip(data *stateData, msg *gossipMessage) bool {
-	gn.appendValueSlice(msg.Messages)
+	go gn.appendValueSlice(msg.Messages)
 	gn.gossipLock.RLock()
 	defer gn.gossipLock.RUnlock()
 	data.dataLock.Lock()
 	defer data.dataLock.Unlock()
-	for curr := gn.version; curr.nr > msg.GotRemoteVersion; curr = curr.prev {
+	gn.stateLock.RLock()
+	defer gn.stateLock.RUnlock()
+	for curr := gn.version; curr != nil && curr.nr >= msg.GotRemoteVersion; curr = curr.prev {
 		if curr.nr == msg.GotRemoteVersion {
 			data.localVersion = curr
 		}
