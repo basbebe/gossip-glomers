@@ -14,13 +14,20 @@ const (
 )
 
 type nodeID string
-type stateVersion int
-type stateSet map[int]stateVersion
+type stateVersion uint
+type versionedValues map[int]*version
+
+type version struct {
+	nr     stateVersion
+	values []int
+	prev   *version
+	next   *version
+}
 
 type stateData struct {
 	dataLock      *sync.RWMutex
 	remoteVersion stateVersion
-	localVersion  stateVersion
+	localVersion  *version
 }
 
 type gossipMessage struct {
@@ -33,27 +40,9 @@ type gossipMessage struct {
 }
 
 type gossipData struct {
-	gossipLock      *sync.RWMutex
-	clusterData     map[nodeID]*stateData
-	versionedValues map[stateVersion]*[]int
-	nodeList        []nodeID
-}
-
-func (gd *gossipData) addVersion(version stateVersion, values *[]int) {
-	gd.gossipLock.Lock()
-	defer gd.gossipLock.Unlock()
-	gd.versionedValues[version] = values
-}
-
-func (gd *gossipData) discardStaleVersions(version stateVersion) {
-	gd.gossipLock.Lock()
-	defer gd.gossipLock.Unlock()
-	for v := range gd.versionedValues {
-		if v >= version {
-			continue
-		}
-		delete(gd.versionedValues, v)
-	}
+	gossipLock  *sync.RWMutex
+	clusterData map[nodeID]*stateData
+	nodeList    []nodeID
 }
 
 type gossipNode struct {
@@ -61,8 +50,8 @@ type gossipNode struct {
 	id   nodeID
 
 	stateLock *sync.RWMutex
-	version   stateVersion
-	values    stateSet
+	version   *version
+	values    versionedValues
 
 	gossipData
 }
@@ -71,34 +60,39 @@ func NewGossipNode(gn *maelstrom.Node) *gossipNode {
 	return &gossipNode{
 		Node:      gn,
 		stateLock: &sync.RWMutex{},
-		values:    make(stateSet),
+		version:   &version{nr: 0},
+		values:    make(versionedValues),
 		gossipData: gossipData{
-			clusterData:     make(map[nodeID]*stateData),
-			gossipLock:      &sync.RWMutex{},
-			versionedValues: make(map[stateVersion]*[]int),
+			gossipLock:  &sync.RWMutex{},
+			clusterData: make(map[nodeID]*stateData),
 		},
 	}
 }
 
-func (gn *gossipNode) appendValue(v int) {
+func (gn *gossipNode) appendValue(val int) {
 	gn.stateLock.Lock()
 	defer gn.stateLock.Unlock()
-	_, exists := gn.values[v]
+	_, exists := gn.values[val]
 	if exists {
 		return
 	}
-	gn.version++
-	gn.values[v] = gn.version
-	gn.gossipData.addVersion(gn.version, &[]int{v})
+	newVersion := &version{
+		nr:     gn.version.nr + 1,
+		values: []int{val},
+		prev:   gn.version,
+	}
+	gn.values[val] = newVersion
+	gn.version.next = newVersion
+	gn.version = newVersion
 }
 
 func (gn *gossipNode) appendValueSlice(values []int) {
 	gn.stateLock.Lock()
 	defer gn.stateLock.Unlock()
 	var (
-		doInc     bool = true
-		version   stateVersion
-		newValues []int
+		doInc bool = true
+		// version    stateVersion
+		newVersion *version
 	)
 	for _, val := range values {
 		_, exists := gn.values[val]
@@ -106,17 +100,19 @@ func (gn *gossipNode) appendValueSlice(values []int) {
 			continue
 		}
 		if doInc {
-			gn.version++
-			version = gn.version
-			doInc = false
+			newVersion = &version{
+				nr:   gn.version.nr + 1,
+				prev: gn.version,
+			}
 		}
-		gn.values[val] = version
-		newValues = append(newValues, val)
+		newVersion.values = append(newVersion.values, val)
+		gn.values[val] = newVersion
 	}
 	if doInc == true {
 		return
 	}
-	gn.gossipData.addVersion(version, &newValues)
+	gn.version.next = newVersion
+	gn.version = newVersion
 }
 
 func (gn *gossipNode) deltaGossip(data *stateData, omit []int) *gossipMessage {
@@ -127,45 +123,50 @@ func (gn *gossipNode) deltaGossip(data *stateData, omit []int) *gossipMessage {
 	data.dataLock.RLock()
 	defer data.dataLock.RUnlock()
 	var (
-		current = gn.version
+		current = gn.version.nr
 		local   = data.localVersion
 		remote  = data.remoteVersion
+		omitMap = make(map[int]struct{}, len(omit))
 		delta   []int
 	)
-loop:
-	for val, ver := range gn.values {
-		if ver <= local {
-			continue
-		}
-		for _, omit := range omit {
-			if val == omit {
-				continue loop
+	for _, v := range omit {
+		omitMap[v] = struct{}{}
+	}
+	for curr := local.next; curr != nil; curr = curr.next {
+		for _, val := range curr.values {
+			_, exists := omitMap[val]
+			if exists {
+				continue
 			}
+			delta = append(delta, val)
 		}
-		delta = append(delta, int(val))
 	}
 	msg := &gossipMessage{
 		Type:             "gossip",
 		Current:          current,
-		SentLocalVersion: local,
+		SentLocalVersion: local.nr,
 		GotRemoteVersion: remote,
 		Messages:         delta,
 	}
 	return msg
 }
 
-func (gn *gossipNode) matchGossip(data *stateData, msg *gossipMessage) bool {
-	go gn.appendValueSlice(msg.Messages)
+func (gn *gossipNode) mergeGossip(data *stateData, msg *gossipMessage) bool {
+	gn.appendValueSlice(msg.Messages)
 	gn.gossipLock.RLock()
 	defer gn.gossipLock.RUnlock()
 	data.dataLock.Lock()
 	defer data.dataLock.Unlock()
-	data.localVersion = msg.GotRemoteVersion
+	for curr := gn.version; curr.nr > msg.GotRemoteVersion; curr = curr.prev {
+		if curr.nr == msg.GotRemoteVersion {
+			data.localVersion = curr
+		}
+	}
 	if msg.SentLocalVersion > data.remoteVersion {
 		return false
 	}
 	data.remoteVersion = msg.Current
-	if msg.GotRemoteVersion != gn.version {
+	if msg.GotRemoteVersion != gn.version.nr {
 		return false
 	}
 	return true
@@ -203,7 +204,8 @@ func (gn *gossipNode) setTopology(topology map[string][]string) error {
 			continue
 		}
 		gn.clusterData[nodeID(node)] = &stateData{
-			dataLock: &sync.RWMutex{},
+			dataLock:     &sync.RWMutex{},
+			localVersion: gn.version,
 		}
 		nodes[i] = nodeID(node)
 		i++

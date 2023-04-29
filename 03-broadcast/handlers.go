@@ -12,6 +12,7 @@ func registerHandles(gn *gossipNode) {
 	gn.handle("topology", handleTopology)
 	gn.handle("gossip", handleGossip)
 }
+
 func handleBroadcast(gn *gossipNode, msg maelstrom.Message) error {
 	var body struct {
 		Message int `json:"message"`
@@ -20,24 +21,19 @@ func handleBroadcast(gn *gossipNode, msg maelstrom.Message) error {
 	if err != nil {
 		return err
 	}
-
 	gn.appendValue(body.Message)
-
 	resp := map[string]string{
 		"type": "broadcast_ok",
 	}
-
 	return gn.Node.Reply(msg, resp)
 }
 
 func handleRead(gn *gossipNode, msg maelstrom.Message) error {
 	messages := gn.getValueList()
-
 	resp := map[string]any{
 		"type":     "read_ok",
 		"messages": messages,
 	}
-
 	return gn.Node.Reply(msg, resp)
 }
 
@@ -49,16 +45,13 @@ func handleTopology(gn *gossipNode, msg maelstrom.Message) error {
 	if err != nil {
 		return err
 	}
-
 	err = gn.setTopology(body.Topology)
 	if err != nil {
 		return err
 	}
-
 	resp := map[string]string{
 		"type": "topology_ok",
 	}
-
 	return gn.Node.Reply(msg, resp)
 }
 
@@ -68,33 +61,26 @@ func handleGossip(gn *gossipNode, msg maelstrom.Message) error {
 	if err != nil {
 		return err
 	}
-
 	data, ok := gn.clusterData[nodeID(msg.Src)]
 	if !ok {
 		panic("node state not found")
 	}
-
-	unchanged := gn.matchGossip(data, body)
-
+	unchanged := gn.mergeGossip(data, body)
 	if unchanged || body.IsReply {
 		return nil
 	}
-
 	return replyGossip(gn, nodeID(msg.Src), body.Messages)
 }
 
 func replyGossip(gn *gossipNode, node nodeID, messages []int) error {
 	body := gn.deltaGossip(gn.clusterData[node], messages)
 	body.IsReply = true
-
 	if len(body.Messages) == 0 && body.SentLocalVersion == body.Current {
 		return nil
 	}
-
 	err := gn.Node.Send(string(node), body)
 	if err != nil {
 		return err
 	}
-
 	return nil
 }
